@@ -3,29 +3,49 @@ use std::path::{Path, PathBuf};
 use crate::graph::DependencyGraph;
 use crate::scanner::ScannedFile;
 
-use super::{ForbiddenImport, RuleViolation, Rules, Severity};
+use super::{ForbiddenImport, RuleViolation, Rules, RulesFile, Severity};
 
 /// Run every enabled rule against the project and collect violations.
 ///
 /// `files` is the scan output (used for per-file checks like line counts);
 /// `graph` is the resolved dependency graph (used for edge & cycle checks).
+///
+/// Convenience wrapper for callers that don't have a `RulesFile` (e.g. tests).
+/// Without a `RulesFile`, per-folder overrides cannot be applied.
 pub fn validate(
     files: &[ScannedFile],
     graph: &DependencyGraph,
     rules: &Rules,
 ) -> Vec<RuleViolation> {
-    let mut violations = Vec::new();
+    let synthetic = RulesFile {
+        rules: rules.clone(),
+        overrides: Vec::new(),
+    };
+    validate_with_overrides(files, graph, &synthetic, None)
+}
 
-    if let Some(limit) = rules.max_file_lines {
-        check_max_file_lines(files, limit, &mut violations);
-    }
+/// Full validator. `rules_file` carries both the base `[rules]` block and any
+/// `[[overrides]]` entries. `project_root` is used to compute file paths
+/// *relative to root* for override glob matching — without it, overrides like
+/// `data/**` won't match because the scanner returns absolute paths on Windows.
+pub fn validate_with_overrides(
+    files: &[ScannedFile],
+    graph: &DependencyGraph,
+    rules_file: &RulesFile,
+    project_root: Option<&Path>,
+) -> Vec<RuleViolation> {
+    let mut violations = Vec::new();
+    let rules = &rules_file.rules;
+    let severity = rules.default_severity;
+
+    check_max_file_lines(files, rules_file, project_root, severity, &mut violations);
 
     if !rules.forbidden_imports.is_empty() {
-        check_forbidden_imports(graph, &rules.forbidden_imports, &mut violations);
+        check_forbidden_imports(graph, &rules.forbidden_imports, severity, &mut violations);
     }
 
     if rules.no_cycles {
-        check_no_cycles(graph, &mut violations);
+        check_no_cycles(graph, severity, &mut violations);
     }
 
     violations
@@ -33,12 +53,27 @@ pub fn validate(
 
 // ---------- max_file_lines ----------
 
-fn check_max_file_lines(files: &[ScannedFile], limit: usize, out: &mut Vec<RuleViolation>) {
+fn check_max_file_lines(
+    files: &[ScannedFile],
+    rules_file: &RulesFile,
+    project_root: Option<&Path>,
+    severity: Severity,
+    out: &mut Vec<RuleViolation>,
+) {
     for file in files {
+        // Compute the file path relative to the project root for override
+        // matching. If we don't have a root, fall back to the bare path.
+        let rel = match project_root {
+            Some(root) => file.path.strip_prefix(root).unwrap_or(&file.path),
+            None => file.path.as_path(),
+        };
+        let Some(limit) = rules_file.effective_max_file_lines(rel) else {
+            continue;
+        };
         if file.line_count > limit {
             out.push(RuleViolation {
                 rule: "max_file_lines".into(),
-                severity: Severity::Error,
+                severity,
                 message: format!(
                     "{} has {} lines, exceeds limit of {}",
                     file.path.display(),
@@ -55,6 +90,7 @@ fn check_max_file_lines(files: &[ScannedFile], limit: usize, out: &mut Vec<RuleV
 fn check_forbidden_imports(
     graph: &DependencyGraph,
     rules: &[ForbiddenImport],
+    severity: Severity,
     out: &mut Vec<RuleViolation>,
 ) {
     for (from_path, to_path) in graph.edges() {
@@ -62,7 +98,7 @@ fn check_forbidden_imports(
             if path_in_folder(from_path, &rule.from) && path_in_folder(to_path, &rule.to) {
                 out.push(RuleViolation {
                     rule: "forbidden_imports".into(),
-                    severity: Severity::Error,
+                    severity,
                     message: format!(
                         "{} (in '{}') imports {} (in '{}'), which is forbidden by rule '{} -> {}'",
                         from_path.display(),
@@ -89,13 +125,13 @@ fn path_in_folder(path: &Path, folder: &str) -> bool {
 
 // ---------- no_cycles ----------
 
-fn check_no_cycles(graph: &DependencyGraph, out: &mut Vec<RuleViolation>) {
+fn check_no_cycles(graph: &DependencyGraph, severity: Severity, out: &mut Vec<RuleViolation>) {
     for cycle in graph.find_cycles() {
         let files: Vec<String> = cycle.iter().map(|p| p.display().to_string()).collect();
         let representative: PathBuf = cycle[0].clone();
         out.push(RuleViolation {
             rule: "no_cycles".into(),
-            severity: Severity::Error,
+            severity,
             message: format!(
                 "Circular dependency detected among {} files (starting at {}): {}",
                 cycle.len(),
@@ -250,6 +286,7 @@ mod tests {
                 from: "ui".into(),
                 to: "db".into(),
             }],
+            ..Default::default()
         };
         let v = validate(&files, &graph, &rules);
         // 1 oversized file + 1 forbidden edge + 1 cycle

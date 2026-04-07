@@ -22,6 +22,14 @@ async fn main() -> Result<()> {
         Some("--register") => return register::run(),
         Some("--add") => return cli_add::run(),
         Some("--tray") => return tray::run(),
+        Some("--baseline") => {
+            // Optional second arg = project path; default to CWD.
+            let path = args
+                .get(1)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            return run_baseline(&path);
+        }
         Some("--version") | Some("-V") => {
             println!("aetherlink {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
@@ -47,6 +55,43 @@ async fn main() -> Result<()> {
     server.run().await
 }
 
+/// Snapshot the project's current violations into `.aetherlink-baseline.json`.
+/// This is the "freeze the rot" command — once the baseline is committed,
+/// existing violations stop blocking writes, but any *new* violation still
+/// does. Re-run this command after fixing real violations to shrink the
+/// baseline. Re-run after tightening rules to re-snapshot at the new bar.
+fn run_baseline(project_root: &std::path::Path) -> Result<()> {
+    use crate::graph::DependencyGraph;
+    use crate::rules::{validate_with_overrides, Baseline, RulesFile};
+    use crate::scanner::FileScanner;
+
+    eprintln!("AetherLink --baseline");
+    eprintln!("=====================");
+    eprintln!("Project: {}", project_root.display());
+
+    let files = FileScanner::new(project_root).scan()?;
+    let mut graph = DependencyGraph::new(project_root);
+    graph.build(&files);
+    let rules_file = RulesFile::load(project_root)?;
+    let violations =
+        validate_with_overrides(&files, &graph, &rules_file, Some(project_root));
+
+    let baseline = Baseline::from_violations(&violations);
+    let path = baseline.save(project_root)?;
+
+    eprintln!("Captured {} violation(s) into baseline.", violations.len());
+    eprintln!("Baseline file: {}", path.display());
+    eprintln!();
+    eprintln!("These violations are now grandfathered. AetherLink will:");
+    eprintln!("  * surface them as warnings in scan reports,");
+    eprintln!("  * NOT block writes because of them, even on the offending files,");
+    eprintln!("  * still block ANY new violation introduced after this point.");
+    eprintln!();
+    eprintln!("Commit {} to your repo so every machine sees the same baseline.", Baseline::FILE_NAME);
+    eprintln!("Re-run `aetherlink --baseline` after fixing violations to shrink it.");
+    Ok(())
+}
+
 fn print_help() {
     println!("AetherLink {} — architectural guardrail MCP server", env!("CARGO_PKG_VERSION"));
     println!();
@@ -58,6 +103,11 @@ fn print_help() {
     println!("                            the current folder, then re-scan");
     println!("    aetherlink --tray       Run the system tray supervisor — shows a green");
     println!("                            or red icon reflecting the latest scan state");
+    println!("    aetherlink --baseline [PATH]");
+    println!("                            Snapshot current violations into");
+    println!("                            .aetherlink-baseline.json so existing rot stops");
+    println!("                            blocking writes. Commit the file. Re-run after");
+    println!("                            fixing violations to shrink the baseline.");
     println!("    aetherlink --version    Print the binary version and exit");
     println!("    aetherlink --help       Show this help");
 }

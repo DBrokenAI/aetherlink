@@ -12,8 +12,9 @@ use super::lease::{AcquireResult, LeaseManager, ReleaseResult, LEASE_DURATION};
 use crate::graph::DependencyGraph;
 use crate::notify;
 use crate::rules::{
-    add_rule_to_toml, remove_rule_from_toml, validate, RemovalOutcome, RuleAddition, RuleRemoval,
-    RuleViolation, Rules,
+    add_rule_to_toml, baseline::split_against_baseline, remove_rule_from_toml,
+    validate_with_overrides, Baseline, RemovalOutcome, RuleAddition, RuleRemoval, RuleViolation,
+    Rules, RulesFile, Severity,
 };
 use crate::scanner::{FileScanner, ImportParser, Language, ScannedFile};
 use crate::security;
@@ -27,10 +28,18 @@ pub struct McpServer {
 /// Output of `evaluate_proposed_change`. Both `check_change` and
 /// `apply_guarded_change` consume this struct so the validation path is
 /// guaranteed identical between the two tools.
+///
+/// `violations` are the *blocking* violations: new errors introduced (or
+/// preserved by touching the target file) that should reject the write.
+/// `warnings` are non-blocking violations: either explicitly `severity =
+/// "warn"` rules, or pre-existing rot grandfathered in by the baseline file.
+/// We surface them in reports so the user can see the debt without being
+/// forced to fix it before unrelated edits.
 struct ProposedChange {
     target: PathBuf,
     synthetic: ScannedFile,
     violations: Vec<RuleViolation>,
+    warnings: Vec<RuleViolation>,
     rules: Rules,
 }
 
@@ -535,40 +544,75 @@ impl McpServer {
             files.push(synthetic.clone());
         }
 
-        // Build a graph and validate against the project rules.
+        // Build a graph and validate against the project rules. Validation
+        // uses `RulesFile` so per-folder `[[overrides]]` are honored.
         let mut graph = DependencyGraph::new(root);
         graph.build(&files);
-        let rules = Rules::load(root)?;
-        let violations_after = validate(&files, &graph, &rules);
+        let rules_file = RulesFile::load(root)?;
+        let rules = rules_file.rules.clone();
+        let violations_after =
+            validate_with_overrides(&files, &graph, &rules_file, Some(root));
 
-        // Compute the *baseline* — what violations exist without this change.
-        // We rescan to get the original on-disk state (if the target already
-        // exists) and run the rules against that. Anything that was already
-        // broken in unrelated files shouldn't block writes elsewhere.
-        let baseline_files = FileScanner::new(root).scan()?;
-        let mut baseline_graph = DependencyGraph::new(root);
-        baseline_graph.build(&baseline_files);
-        let baseline_violations = validate(&baseline_files, &baseline_graph, &rules);
-        let baseline_msgs: std::collections::HashSet<String> = baseline_violations
-            .into_iter()
-            .map(|v| v.message)
-            .collect();
+        // === Ratchet logic ===
+        //
+        // We layer two filters on top of the raw "after" violations to decide
+        // what is *blocking* vs. what is just informational:
+        //
+        //  1. The committed `.aetherlink-baseline.json` (if present). Any
+        //     violation whose fingerprint is in the baseline is grandfathered:
+        //     it's pre-existing rot, the user has acknowledged it, and it
+        //     does not block. This replaces the brittle "filter by message
+        //     text" heuristic the previous version used.
+        //
+        //  2. The dynamic baseline computed from the *current on-disk* state.
+        //     Even without a committed baseline, we don't want unrelated
+        //     pre-existing violations to block this specific write. Any
+        //     violation that already existed before the proposed edit, *and*
+        //     doesn't mention the file being written, is also informational.
+        //     Touching a still-broken target file remains blocking — that's
+        //     how we keep "you must fix it as you touch it" semantics for
+        //     opportunistic cleanup.
+        //
+        //  3. `severity = "warn"` rules never block regardless of either
+        //     baseline. They go straight to the warnings bucket.
+        let committed_baseline = Baseline::load(root)?;
+        let (after_baseline_filter, mut warnings) =
+            split_against_baseline(violations_after, committed_baseline.as_ref());
 
-        // Keep a violation only if it is NEW (not in the baseline) OR it
-        // mentions the target file we're writing to. The second condition
-        // means: if the file you're touching is still illegal after your
-        // change, you must fix it before the write goes through — but
-        // pre-existing violations in *other* files don't punish you.
+        let on_disk_files = FileScanner::new(root).scan()?;
+        let mut on_disk_graph = DependencyGraph::new(root);
+        on_disk_graph.build(&on_disk_files);
+        let pre_existing = validate_with_overrides(
+            &on_disk_files,
+            &on_disk_graph,
+            &rules_file,
+            Some(root),
+        );
+        let pre_existing_fps: std::collections::HashSet<String> =
+            pre_existing.iter().map(|v| v.fingerprint()).collect();
+
         let target_str = target.display().to_string();
-        let violations: Vec<_> = violations_after
-            .into_iter()
-            .filter(|v| !baseline_msgs.contains(&v.message) || v.message.contains(&target_str))
-            .collect();
+        let mut violations = Vec::new();
+        for v in after_baseline_filter {
+            // Warnings never block.
+            if v.severity == Severity::Warning {
+                warnings.push(v);
+                continue;
+            }
+            let pre = pre_existing_fps.contains(&v.fingerprint());
+            let touches_target = v.message.contains(&target_str);
+            if !pre || touches_target {
+                violations.push(v);
+            } else {
+                warnings.push(v);
+            }
+        }
 
         Ok(ProposedChange {
             target,
             synthetic,
             violations,
+            warnings,
             rules,
         })
     }
@@ -646,11 +690,27 @@ impl McpServer {
         if pc.violations.is_empty() {
             // No status mutation here — `check_change` is a hypothetical, it
             // shouldn't overwrite the project's last real scan result.
+            let warning_block = if pc.warnings.is_empty() {
+                String::new()
+            } else {
+                let lines: Vec<String> = pc
+                    .warnings
+                    .iter()
+                    .enumerate()
+                    .map(|(i, w)| format!("  ({}) {}: {}", i + 1, w.rule, w.message))
+                    .collect();
+                format!(
+                    "\n\n{} non-blocking warning{} (grandfathered or severity=warn):\n{}",
+                    pc.warnings.len(),
+                    if pc.warnings.len() == 1 { "" } else { "s" },
+                    lines.join("\n")
+                )
+            };
             return Ok(format!(
                 "APPROVED: proposed change to {} passes all architectural rules.\n\
                  - new line count: {}\n\
                  - parsed imports: {}\n\
-                 - rules enforced: max_file_lines={:?}, no_cycles={}, forbidden_imports={}\n\
+                 - rules enforced: max_file_lines={:?}, no_cycles={}, forbidden_imports={}{}\n\
                  Safe to write — but use `apply_guarded_change` to actually save it; that tool re-validates and writes atomically so a stale `check_change` result can never be silently bypassed.",
                 pc.target.display(),
                 pc.synthetic.line_count,
@@ -658,6 +718,7 @@ impl McpServer {
                 pc.rules.max_file_lines,
                 pc.rules.no_cycles,
                 pc.rules.forbidden_imports.len(),
+                warning_block,
             ));
         }
 
@@ -889,8 +950,27 @@ impl McpServer {
         let mut graph = DependencyGraph::new(&root);
         graph.build(&files);
 
-        let rules = Rules::load(&root)?;
-        let violations = validate(&files, &graph, &rules);
+        let rules_file = RulesFile::load(&root)?;
+        let rules = rules_file.rules.clone();
+        let raw = validate_with_overrides(&files, &graph, &rules_file, Some(&root));
+
+        // Apply the same ratchet as the guarded-write path: split against the
+        // committed baseline so pre-existing rot is shown as warnings rather
+        // than treated as an architectural failure of the build.
+        let committed_baseline = Baseline::load(&root)?;
+        let (mut violations, mut warnings) =
+            split_against_baseline(raw, committed_baseline.as_ref());
+
+        // Demote `severity = "warn"` violations.
+        let mut still_blocking = Vec::new();
+        for v in violations.drain(..) {
+            if v.severity == Severity::Warning {
+                warnings.push(v);
+            } else {
+                still_blocking.push(v);
+            }
+        }
+        let violations = still_blocking;
 
         if !violations.is_empty() {
             let mut report = String::new();
@@ -913,6 +993,22 @@ impl McpServer {
                     v.rule,
                     v.message
                 ));
+            }
+            if !warnings.is_empty() {
+                report.push_str(&format!(
+                    "\nAlso {} warning{} (informational, not blocking):\n",
+                    warnings.len(),
+                    if warnings.len() == 1 { "" } else { "s" },
+                ));
+                for (i, v) in warnings.iter().enumerate() {
+                    report.push_str(&format!(
+                        "  ({}) {}: {}\n",
+                        i + 1,
+                        v.rule,
+                        v.message
+                    ));
+                }
+                report.push('\n');
             }
             report.push_str(
                 "Fix every violation above, then re-run scan_project to verify the project is legal.\n",
@@ -953,10 +1049,13 @@ impl McpServer {
             "files_scanned": files.len(),
             "graph_nodes": graph.node_count(),
             "graph_edges": graph.edge_count(),
+            "warnings_count": warnings.len(),
+            "baseline_active": committed_baseline.is_some(),
             "rules_loaded": {
                 "max_file_lines": rules.max_file_lines,
                 "no_cycles": rules.no_cycles,
                 "forbidden_imports": rules.forbidden_imports.len(),
+                "default_severity": format!("{:?}", rules.default_severity).to_lowercase(),
             },
             "files": files.iter().map(|f| json!({
                 "path": f.path.display().to_string(),

@@ -15,14 +15,24 @@ pub struct DependencyGraph {
     index_map: HashMap<PathBuf, NodeIndex>,
     /// Project root used for resolving relative/absolute imports.
     root: PathBuf,
+    /// JS/TS path aliases loaded from tsconfig.json / jsconfig.json. Maps an
+    /// alias prefix (e.g. `@/`) to one or more on-disk base directories. We
+    /// store the prefix as a plain string (no glob), and resolution rewrites
+    /// `@/foo/bar` to `<base>/foo/bar` before falling through to the regular
+    /// JS resolver. This is the minimum that lets modern Next.js / Vite /
+    /// CRA-aliased projects participate in forbidden-import rules.
+    js_aliases: Vec<(String, Vec<PathBuf>)>,
 }
 
 impl DependencyGraph {
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let js_aliases = load_js_aliases(&root);
         Self {
             graph: DiGraph::new(),
             index_map: HashMap::new(),
-            root: root.into(),
+            root,
+            js_aliases,
         }
     }
 
@@ -256,20 +266,41 @@ impl DependencyGraph {
     }
 
     fn resolve_js(&self, from: &Path, import: &str) -> Option<PathBuf> {
-        // Only resolve relative imports — bare specifiers are npm packages.
+        // Path-aliased import (e.g. `@/services/foo`)? Try every alias mapping.
+        // We rewrite to the alias's base dir + remainder, then run the
+        // normal JS resolver on the rewritten path. If none of the aliases
+        // match, fall through to the relative-import handling below.
         if !import.starts_with('.') && !import.starts_with('/') {
+            for (prefix, bases) in &self.js_aliases {
+                if let Some(rest) = import.strip_prefix(prefix.as_str()) {
+                    for base_dir in bases {
+                        let candidate = base_dir.join(rest);
+                        if let Some(found) = self.try_js_candidate(&candidate) {
+                            return Some(found);
+                        }
+                    }
+                }
+            }
+            // Bare specifier with no matching alias = npm package, ignore.
             return None;
         }
 
         let parent = from.parent()?;
         let base = parent.join(import);
 
+        self.try_js_candidate(&base)
+    }
+
+    /// Shared JS file-resolution logic. Given a base path (with or without an
+    /// extension), try the standard set of JS/TS extensions and `index.*`
+    /// fallbacks. Used by both relative-import and aliased-import resolution.
+    fn try_js_candidate(&self, base: &Path) -> Option<PathBuf> {
         let extensions = ["ts", "tsx", "js", "jsx", "mjs", "cjs"];
 
-        // Try `import` as exact file. We must normalize before returning,
-        // otherwise candidates like `src/screens/../data/recipes.js` exist on
-        // disk but don't match the canonical keys in `index_map`, so the edge
-        // is silently dropped and forbidden-import rules never fire.
+        // Try `base.<ext>`. We must normalize before checking, otherwise
+        // candidates like `src/screens/../data/recipes.js` exist on disk but
+        // don't match the canonical keys in `index_map`, so the resolved
+        // edge is silently dropped and forbidden-import rules never fire.
         for ext in &extensions {
             let candidate = normalize_path(&base.with_extension(ext));
             if candidate.exists() {
@@ -284,12 +315,121 @@ impl DependencyGraph {
             }
         }
         // Already-extensioned import
-        let base_norm = normalize_path(&base);
+        let base_norm = normalize_path(base);
         if base_norm.exists() && base_norm.is_file() {
             return Some(base_norm);
         }
         None
     }
+}
+
+/// Read tsconfig.json / jsconfig.json from the project root and extract its
+/// `compilerOptions.paths` map plus `compilerOptions.baseUrl`. We deliberately
+/// support only the simplest form: an alias of the shape `"@/*": ["src/*"]`,
+/// which covers Next.js, Vite, and CRA defaults. Wildcards in the middle of an
+/// alias are ignored. Returns the alias prefix (with `/`) and a list of
+/// resolved on-disk base directories — *not* glob templates, because we
+/// stitch the rest of the import string onto them at lookup time.
+fn load_js_aliases(root: &Path) -> Vec<(String, Vec<PathBuf>)> {
+    for filename in ["tsconfig.json", "jsconfig.json"] {
+        let path = root.join(filename);
+        if !path.exists() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        // Strip /* */ and // comments — tsconfig.json is JSONC.
+        let cleaned = strip_jsonc_comments(&text);
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&cleaned) else {
+            tracing::warn!("Failed to parse {} for path aliases", path.display());
+            continue;
+        };
+        let opts = &value["compilerOptions"];
+        let base_url = opts["baseUrl"].as_str().unwrap_or(".");
+        let alias_root = root.join(base_url);
+        let Some(paths) = opts["paths"].as_object() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (alias, targets) in paths {
+            // Only support `prefix/*` shape.
+            let Some(prefix) = alias.strip_suffix("/*") else {
+                continue;
+            };
+            let prefix = format!("{prefix}/");
+            let mut bases = Vec::new();
+            if let Some(arr) = targets.as_array() {
+                for t in arr {
+                    if let Some(t) = t.as_str() {
+                        let Some(t_prefix) = t.strip_suffix("/*") else {
+                            continue;
+                        };
+                        bases.push(alias_root.join(t_prefix));
+                    }
+                }
+            }
+            if !bases.is_empty() {
+                out.push((prefix, bases));
+            }
+        }
+        return out;
+    }
+    Vec::new()
+}
+
+/// Strip `// line` and `/* block */` comments from a JSONC string. Naive but
+/// good enough for the well-formed tsconfig files we'll see in practice.
+fn strip_jsonc_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    let mut escape = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            continue;
+        }
+        if c == '/' {
+            match chars.peek() {
+                Some('/') => {
+                    chars.next();
+                    while let Some(&n) = chars.peek() {
+                        if n == '\n' {
+                            break;
+                        }
+                        chars.next();
+                    }
+                    continue;
+                }
+                Some('*') => {
+                    chars.next();
+                    while let Some(n) = chars.next() {
+                        if n == '*' && chars.peek() == Some(&'/') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Collapse `.` and `..` components from a path lexically (no disk access).

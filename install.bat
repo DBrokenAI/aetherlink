@@ -117,6 +117,32 @@ if %errorlevel%==0 (
 )
 echo.
 
+REM ---- Register with Cursor (MCP) ----------------------------------
+REM Cursor stores MCP servers in %USERPROFILE%\.cursor\mcp.json. We
+REM merge our entry into that file via PowerShell so we don't clobber
+REM whatever the user already has registered. Skipped silently if
+REM Cursor is not installed.
+
+if exist "%USERPROFILE%\.cursor" (
+    echo Registering with Cursor...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "$cfg = Join-Path $env:USERPROFILE '.cursor\mcp.json';" ^
+        "if (Test-Path $cfg) { $obj = Get-Content -Raw $cfg | ConvertFrom-Json } else { $obj = [pscustomobject]@{} };" ^
+        "if (-not $obj.PSObject.Properties.Match('mcpServers').Count) { $obj | Add-Member -NotePropertyName mcpServers -NotePropertyValue ([pscustomobject]@{}) };" ^
+        "$entry = [pscustomobject]@{ command = '%INSTALL_EXE%'; args = @() };" ^
+        "if ($obj.mcpServers.PSObject.Properties.Match('aetherlink').Count) { $obj.mcpServers.aetherlink = $entry } else { $obj.mcpServers | Add-Member -NotePropertyName aetherlink -NotePropertyValue $entry };" ^
+        "$obj | ConvertTo-Json -Depth 10 | Set-Content -Path $cfg -Encoding UTF8;" ^
+        "Write-Host 'Registered with Cursor as MCP server aetherlink.'"
+    if errorlevel 1 (
+        echo WARNING: Cursor registration failed. Add it manually by editing
+        echo %USERPROFILE%\.cursor\mcp.json and adding under mcpServers:
+        echo   "aetherlink": { "command": "%INSTALL_EXE%", "args": [] }
+    )
+) else (
+    echo Cursor not detected; skipping its registration.
+)
+echo.
+
 REM ---- Done --------------------------------------------------------
 echo.
 echo ================================================================
