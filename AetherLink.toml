@@ -1,0 +1,14 @@
+# AetherLink architectural rules.
+# Edit these to define the laws AetherLink will enforce on your project.
+
+[rules]
+# Reject any source file longer than this many lines.
+max_file_lines = 500
+
+# Block circular dependencies in the import graph.
+no_cycles = true
+
+# Block specific cross-folder imports. Format: "from -> to".
+# Each side matches any directory component of a file's path.
+# Example: forbidden_imports = ["ui -> db", "api -> secret"]
+forbidden_imports = []

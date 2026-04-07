@@ -1,0 +1,47 @@
+[package]
+name = "aetherlink"
+version = "0.1.0"
+edition = "2021"
+description = "MCP server that acts as an architectural guardrail for AI agents"
+
+[dependencies]
+# MCP server (JSON-RPC over stdio)
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dialoguer = "0.11"
+
+# Desktop notifications + system tray (used by --tray and by toasts fired from
+# the MCP handlers when scans/checks find violations).
+notify-rust = "4"
+tray-icon = "0.22"
+tao = "0.35"
+
+# File scanning & parsing
+walkdir = "2"
+glob = "0.3"
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+streaming-iterator = "0.1"
+
+# Dependency graph
+petgraph = "0.7"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3        # Max runtime speed
+lto = true           # Link-time optimization (smaller + faster)
+codegen-units = 1    # Single codegen unit enables more inlining
+panic = "abort"      # Smaller binary; we don't unwind across MCP boundaries anyway
+strip = true         # Strip debug symbols from the shipped binary
