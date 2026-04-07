@@ -117,6 +117,39 @@ if %errorlevel%==0 (
 )
 echo.
 
+REM ---- Register Claude Code PreToolUse hooks -----------------------
+REM This is the part that turns AetherLink from "MCP server the agent
+REM might call" into a hard guardrail. We add a PreToolUse hook for
+REM Edit / Write / MultiEdit that pipes the tool payload into
+REM `aetherlink --hook-check`. The hook exits 2 to block illegal
+REM writes; Claude Code surfaces stderr back to the model. The agent
+REM physically cannot bypass this — even if it has no idea AetherLink
+REM exists, every write goes through it.
+REM
+REM We merge into ~/.claude/settings.json via PowerShell so we don't
+REM clobber the user's existing settings or other hooks.
+
+echo Installing Claude Code PreToolUse hooks...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$cfgDir = Join-Path $env:USERPROFILE '.claude';" ^
+    "if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null };" ^
+    "$cfg = Join-Path $cfgDir 'settings.json';" ^
+    "if (Test-Path $cfg) { $obj = Get-Content -Raw $cfg | ConvertFrom-Json } else { $obj = [pscustomobject]@{} };" ^
+    "if (-not $obj.PSObject.Properties.Match('hooks').Count) { $obj | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{}) };" ^
+    "$exe = '%INSTALL_EXE%' -replace '\\','/';" ^
+    "$entry = [pscustomobject]@{ matcher = 'Edit|Write|MultiEdit'; hooks = @(@{ type = 'command'; command = ($exe + ' --hook-check') }) };" ^
+    "$obj.hooks | Add-Member -NotePropertyName PreToolUse -NotePropertyValue @($entry) -Force;" ^
+    "$obj | ConvertTo-Json -Depth 10 | Set-Content -Path $cfg -Encoding UTF8;" ^
+    "Write-Host 'Installed PreToolUse hook for Edit/Write/MultiEdit.'"
+if errorlevel 1 (
+    echo WARNING: hook installation failed. AetherLink will still work as
+    echo an MCP server, but agents that use built-in Edit/Write tools will
+    echo bypass the rules. Add this to ~/.claude/settings.json manually:
+    echo   "hooks": { "PreToolUse": [ { "matcher": "Edit^|Write^|MultiEdit",
+    echo     "hooks": [ { "type": "command", "command": "%INSTALL_EXE% --hook-check" } ] } ] }
+)
+echo.
+
 REM ---- Register with Cursor (MCP) ----------------------------------
 REM Cursor stores MCP servers in %USERPROFILE%\.cursor\mcp.json. We
 REM merge our entry into that file via PowerShell so we don't clobber

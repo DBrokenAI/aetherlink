@@ -1,5 +1,6 @@
 mod cli_add;
 mod graph;
+mod hook;
 mod mcp;
 mod notify;
 mod register;
@@ -22,6 +23,7 @@ async fn main() -> Result<()> {
         Some("--register") => return register::run(),
         Some("--add") => return cli_add::run(),
         Some("--tray") => return tray::run(),
+        Some("--hook-check") => return hook::run(),
         Some("--baseline") => {
             // Optional second arg = project path; default to CWD.
             let path = args
@@ -103,6 +105,11 @@ fn print_help() {
     println!("                            the current folder, then re-scan");
     println!("    aetherlink --tray       Run the system tray supervisor — shows a green");
     println!("                            or red icon reflecting the latest scan state");
+    println!("    aetherlink --hook-check  Read a Claude Code PreToolUse hook payload");
+    println!("                            from stdin and exit 0 (allow) or 2 (block).");
+    println!("                            Installed automatically by install.bat into");
+    println!("                            ~/.claude/settings.json so Edit/Write/MultiEdit");
+    println!("                            calls cannot bypass AetherLink rules.");
     println!("    aetherlink --baseline [PATH]");
     println!("                            Snapshot current violations into");
     println!("                            .aetherlink-baseline.json so existing rot stops");
