@@ -52,31 +52,6 @@ cargo build --release
 ./target/release/aetherlink --install-hook
 ```
 
-## The "one rule, one week" onboarding
-
-Don't try to design your whole ruleset upfront. The right way to find
-the rules your project actually needs is to start with **one** and
-discover the rest over time.
-
-1. Pick the project you know best.
-2. Drop a minimal `AetherLink.toml` in the root with one rule:
-
-   ```toml
-   [rules]
-   forbidden_imports = ["frontend -> backend"]
-   ```
-
-3. Run `aetherlink --baseline .` to grandfather any existing
-   violations and commit `.aetherlink-baseline.json`.
-4. Use the project normally for a week. Don't tell Claude AetherLink
-   exists. See what gets blocked.
-5. After a week, decide whether your one rule is too loose, too tight,
-   or wrong. Add or adjust **one** rule. Re-baseline. Repeat.
-
-The mistake people make is trying to validate the tool with synthetic
-tests. Synthetic tests tell you the code runs. Only real usage tells
-you the rules are useful.
-
 ## Supported rules
 
 ```toml
