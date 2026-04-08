@@ -3,6 +3,30 @@ name = "aetherlink"
 version = "0.1.0"
 edition = "2021"
 description = "MCP server that acts as an architectural guardrail for AI agents"
+license = "MIT"
+repository = "https://github.com/DBrokenAI/aetherlink"
+homepage = "https://github.com/DBrokenAI/aetherlink"
+readme = "README.md"
+
+# cargo-dist (axo.dev) configuration. One config, three platforms,
+# auto-generated GitHub Releases + Homebrew formula + curl|sh installer
+# + Scoop manifest + PowerShell installer. The release.yml workflow
+# consumes this.
+[workspace.metadata.dist]
+cargo-dist-version = "0.21.1"
+ci = ["github"]
+installers = ["shell", "powershell", "homebrew"]
+tap = "DBrokenAI/homebrew-tap"
+publish-jobs = ["homebrew"]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+pr-run-mode = "plan"
+install-updater = false
 
 [dependencies]
 # MCP server (JSON-RPC over stdio)

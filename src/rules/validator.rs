@@ -116,11 +116,21 @@ fn check_forbidden_imports(
 
 /// True if any directory component of `path` equals `folder`.
 /// e.g. `src/ui/button.tsx` is "in" folder `ui`.
+///
+/// Comparison is **case-insensitive**. Without this, a `forbidden_imports`
+/// rule of `"ui -> db"` matches `src/ui/button.tsx` on Windows and macOS
+/// (case-insensitive filesystems) but silently misses `src/UI/Button.tsx`
+/// on Linux. The same project would then enforce different rules on
+/// different developer machines, which is exactly the kind of latent
+/// portability bug AetherLink is supposed to *prevent*, not introduce.
 fn path_in_folder(path: &Path, folder: &str) -> bool {
     let Some(parent) = path.parent() else { return false };
-    parent
-        .components()
-        .any(|c| c.as_os_str().to_str() == Some(folder))
+    parent.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .map(|s| s.eq_ignore_ascii_case(folder))
+            .unwrap_or(false)
+    })
 }
 
 // ---------- no_cycles ----------
@@ -206,6 +216,34 @@ mod tests {
         assert_eq!(v[0].rule, "forbidden_imports");
         assert!(v[0].message.contains("button.rs"));
         assert!(v[0].message.contains("conn.rs"));
+    }
+
+    #[test]
+    fn forbidden_imports_is_case_insensitive() {
+        // Regression test for cross-platform consistency. On Linux,
+        // `src/UI/Button.rs` and `src/ui/button.rs` are different paths,
+        // but a rule like `ui -> db` should match either folder casing
+        // so the same AetherLink.toml enforces the same boundary on
+        // every developer's machine, not just on case-insensitive ones.
+        let mut graph = DependencyGraph::new("/project");
+        graph.add_file("src/UI/Button.rs");
+        graph.add_file("src/DB/Conn.rs");
+        graph.add_dependency(Path::new("src/UI/Button.rs"), Path::new("src/DB/Conn.rs"));
+
+        let rules = Rules {
+            forbidden_imports: vec![ForbiddenImport {
+                from: "ui".into(),
+                to: "db".into(),
+            }],
+            ..Default::default()
+        };
+
+        let v = validate(&[], &graph, &rules);
+        assert_eq!(
+            v.len(),
+            1,
+            "ui->db rule must match UI->DB folders regardless of case"
+        );
     }
 
     #[test]

@@ -1,0 +1,110 @@
+name: Release
+
+# Release workflow driven by cargo-dist (axo.dev). When a tag like
+# `v0.4.0` is pushed, this builds release binaries for every target
+# in [workspace.metadata.dist].targets, uploads them to a GitHub
+# Release, and publishes the Homebrew tap formula and shell/PowerShell
+# installer scripts.
+#
+# To cut a release:
+#   cargo install cargo-dist
+#   cargo dist init        # only once, or after editing the dist config
+#   git tag v0.4.0
+#   git push --tags
+#
+# Users then install with one of:
+#   brew install danbr/tap/aetherlink
+#   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/danbr/aetherlink/releases/latest/download/aetherlink-installer.sh | sh
+#   irm https://github.com/danbr/aetherlink/releases/latest/download/aetherlink-installer.ps1 | iex
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-**'
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      val: ${{ steps.plan.outputs.manifest }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install cargo-dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.21.1/cargo-dist-installer.sh | sh
+      - id: plan
+        run: |
+          cargo dist plan --tag=${{ github.ref_name }} --output-format=json > plan-dist-manifest.json
+          echo "manifest=$(cat plan-dist-manifest.json | jq -c .)" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxdo-dev libayatana-appindicator3-dev libssl-dev pkg-config
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
+      - name: Install cargo-dist
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            powershell -c "irm https://github.com/axodotdev/cargo-dist/releases/download/v0.21.1/cargo-dist-installer.ps1 | iex"
+          else
+            curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.21.1/cargo-dist-installer.sh | sh
+          fi
+      - name: Build
+        run: cargo dist build --target=${{ matrix.target }} --artifacts=local
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: target/distrib/*
+
+  publish:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: target/distrib/
+          merge-multiple: true
+      - name: Install cargo-dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.21.1/cargo-dist-installer.sh | sh
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ needs.plan.outputs.tag }} \
+            --title "${{ needs.plan.outputs.tag }}" \
+            --notes "Automated release from cargo-dist." \
+            target/distrib/*

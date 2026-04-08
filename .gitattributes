@@ -1,0 +1,17 @@
+# Force LF on every text file regardless of contributor OS. This keeps
+# baseline JSON, AetherLink.toml, README, and source files byte-identical
+# across Mac/Linux/Windows checkouts so neither git nor cargo-dist
+# generate noisy diffs from autocrlf rewriting.
+* text=auto eol=lf
+
+# Binary types — never touch.
+*.png binary
+*.ico binary
+*.jpg binary
+*.zip binary
+*.gz binary
+
+# Windows-only artifacts that should keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

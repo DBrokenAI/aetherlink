@@ -1,6 +1,7 @@
 mod cli_add;
 mod graph;
 mod hook;
+mod install_hook;
 mod mcp;
 mod notify;
 mod register;
@@ -24,6 +25,8 @@ async fn main() -> Result<()> {
         Some("--add") => return cli_add::run(),
         Some("--tray") => return tray::run(),
         Some("--hook-check") => return hook::run(),
+        Some("--install-hook") => return install_hook::install(),
+        Some("--uninstall-hook") => return install_hook::uninstall(),
         Some("--baseline") => {
             // Optional second arg = project path; default to CWD.
             let path = args
@@ -115,6 +118,13 @@ fn print_help() {
     println!("                            .aetherlink-baseline.json so existing rot stops");
     println!("                            blocking writes. Commit the file. Re-run after");
     println!("                            fixing violations to shrink the baseline.");
+    println!("    aetherlink --install-hook");
+    println!("                            Patch ~/.claude/settings.json to register the");
+    println!("                            PreToolUse hook on every OS. Idempotent. Use this");
+    println!("                            on macOS / Linux instead of install.bat.");
+    println!("    aetherlink --uninstall-hook");
+    println!("                            Remove the AetherLink hook entry from settings.json,");
+    println!("                            leaving any other hooks in place.");
     println!("    aetherlink --version    Print the binary version and exit");
     println!("    aetherlink --help       Show this help");
 }
