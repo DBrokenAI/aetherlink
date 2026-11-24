@@ -13,9 +13,9 @@ name: Release
 #   git push --tags
 #
 # Users then install with one of:
-#   brew install danbr/tap/aetherlink
-#   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/danbr/aetherlink/releases/latest/download/aetherlink-installer.sh | sh
-#   irm https://github.com/danbr/aetherlink/releases/latest/download/aetherlink-installer.ps1 | iex
+#   brew install DBrokenAI/tap/aetherlink
+#   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/DBrokenAI/aetherlink/releases/latest/download/aetherlink-installer.sh | sh
+#   irm https://github.com/DBrokenAI/aetherlink/releases/latest/download/aetherlink-installer.ps1 | iex
 
 on:
   push:
